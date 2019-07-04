@@ -24,18 +24,14 @@
 
 import pprint
 
-try:
-    from BaseHTTPServer import BaseHTTPRequestHandler
-    from StringIO import StringIO
-except ImportError:
-    # python3
-    from http.server import BaseHTTPRequestHandler
-    from io import StringIO
+# python3
+from http.server import BaseHTTPRequestHandler
+from io import BytesIO
 
 #class to parse request informations
 class HTTPRequest(BaseHTTPRequestHandler):
     def __init__(self, request_text):
-        self.rfile = StringIO(request_text.decode("utf-8"))
+        self.rfile = BytesIO(request_text)
         self.raw_requestline = self.rfile.readline()
         self.error_code = self.error_message = None
         self.parse_request()

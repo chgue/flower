@@ -58,18 +58,15 @@ def main():
         if pkt.transport_layer != "TCP":
             continue
     
-        # Skip packets without payload 
-        if "payload" not in pkt.tcp.field_names:
-            continue
-    
+            
         # Check if this is the first packet of the stream
         stream_id = pkt.tcp.stream
         if stream_id not in streams:
             init_stream = {"inx": stream_id, #TODO hmm?
                     "filename": filename,
-                    "src_ip": pkt.ip.src,
+                    "src_ip": pkt.ipv6.src,
                     "src_port": int(pkt.tcp.srcport),
-                    "dst_ip": pkt.ip.dst,
+                    "dst_ip": pkt.ipv6.dst,
                     "dst_port": int(pkt.tcp.dstport),
                     "time": round(datetime.timestamp(pkt.sniff_time)*1000),
                     "duration": -1,
@@ -83,17 +80,21 @@ def main():
         stream = streams[stream_id]
         # Update the duration 
         stream["duration"] = round(float(pkt.tcp.time_relative) * 1000);
-        
+
+        # Skip packets without payload 
+        if "payload" not in pkt.tcp.field_names:
+            continue
+    
         # Parse the payload
         raw_data = pkt.tcp.payload.split(":")
         printable_data = ''.join([chr(int(i, 16)) if chr(int(i, 16)) in string.printable else "x%s" % i for i in raw_data])
     
         # Check if flag is contained
         if not stream["contains_flag"] and containsFlag(printable_data):
-                stream["contains_flag"] = True
+            stream["contains_flag"] = True
     
         # Name of sender "c" == client, "s" == server
-        name = "s" if stream["src_ip"] == pkt.ip.src and stream["src_port"] == int(pkt.tcp.srcport) else "c"
+        name = "s" if stream["src_ip"] == pkt.ipv6.src and stream["src_port"] == int(pkt.tcp.srcport) else "c"
     
         # Create new entry if flow is empty or previous sender does not match current sender.
         # Otherwise concatenate it.
@@ -110,9 +111,13 @@ def main():
             flow[-1]["hex"] += "".join(raw_data)
             
     # Insert into DB
-    db.insertFlows(filename, list(streams.values()))
-    db.setFileImported(filename)
-    print("Imported %s successfully." % filename)
+    list_streams = list(streams.values())
+    if list_streams:
+        db.insertFlows(filename, list_streams)
+        db.setFileImported(filename)
+        print("Imported %s successfully." % filename)
+    else:
+        print("%s is empty." % filename)
 
 if __name__ == "__main__":
     main()
