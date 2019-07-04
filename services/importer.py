@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 # This file is part of Flower.
@@ -24,109 +24,95 @@
 
 #Script that import pcap into flower dg
 import json
-import nids #good luck installing pynids!
+import pyshark
 import sys
 import string
-import pprint
-import time
+from datetime import datetime
 
 from configurations import containsFlag
 from db import DB
 
-end_states = (nids.NIDS_CLOSE, nids.NIDS_TIMEOUT, nids.NIDS_RESET)
-db = DB()
-
-data_flow = {}
-filename = ""
-flows_to_import = []
-ts = {}
-contains_flag = {}
-done = 0
-start_time = {}
-inx = 0
-
-
-def handleTcpStream(tcp):
-    global data_flow, ts, contains_flag, done, start_time, inx
-
-    if tcp.nids_state == nids.NIDS_JUST_EST:
-        tcp.client.collect = 1
-        tcp.server.collect = 1
-        data_flow[tcp.addr] = []
-        start_time[tcp.addr] = int(float(nids.get_pkt_ts()) * 1000)
-        contains_flag[tcp.addr] = False
-    elif tcp.nids_state == nids.NIDS_DATA:
-        actor = tcp.client if tcp.client.count_new > 0 else tcp.server
-
-        cnt = actor.count_new
-        data = actor.data[:cnt]
-        printable_data = ''.join([i if i in string.printable else '\\x{:02x}'.format(ord(i)) for i in data])
-        name = "c" if actor is tcp.client else "s"
-
-        last_flow = (data_flow[tcp.addr] or [None])[-1]
-        #this is from server, and last one is from server. Just concatenate data
-        if last_flow and last_flow["from"] == name: 
-            data_flow[tcp.addr][-1]["data"] += printable_data
-            data_flow[tcp.addr][-1]["hex"] += data.encode("hex")
+# Get filename
+def main():
+    filename = ""
+    if len(sys.argv) == 2:
+        filename = sys.argv[1]
+        if "./" in filename:
+            filename = filename[2:]
+        print("Importing file %s." % filename)
+    else:
+        print("pcap file required!")
+        exit(1)
+    
+    db = DB()
+    # Do nothing if file is already imported
+    if db.isFileAlreadyImported(filename):
+        print("File %s already imported!" % filename)
+        exit()
+    
+    # Loop over all packets and populate flows_to_import
+    packets = pyshark.FileCapture(filename)
+    streams = {}
+    for pkt in packets:
+        # Skip non TCP packets
+        if pkt.transport_layer != "TCP":
+            continue
+    
+        # Skip packets without payload 
+        if "payload" not in pkt.tcp.field_names:
+            continue
+    
+        # Check if this is the first packet of the stream
+        stream_id = pkt.tcp.stream
+        if stream_id not in streams:
+            init_stream = {"inx": stream_id, #TODO hmm?
+                    "filename": filename,
+                    "src_ip": pkt.ip.src,
+                    "src_port": int(pkt.tcp.srcport),
+                    "dst_ip": pkt.ip.dst,
+                    "dst_port": int(pkt.tcp.dstport),
+                    "time": round(datetime.timestamp(pkt.sniff_time)*1000),
+                    "duration": -1,
+                    "contains_flag": False,
+                    "starred": 0,
+                    "flow": []
+                    }
+            streams[stream_id] = init_stream
+    
+        # Update the stream
+        stream = streams[stream_id]
+        # Update the duration 
+        stream["duration"] = round(float(pkt.tcp.time_relative) * 1000);
+        
+        # Parse the payload
+        raw_data = pkt.tcp.payload.split(":")
+        printable_data = ''.join([chr(int(i, 16)) if chr(int(i, 16)) in string.printable else "x%s" % i for i in raw_data])
+    
+        # Check if flag is contained
+        if not stream["contains_flag"] and containsFlag(printable_data):
+                stream["contains_flag"] = True
+    
+        # Name of sender "c" == client, "s" == server
+        name = "s" if stream["src_ip"] == pkt.ip.src and stream["src_port"] == int(pkt.tcp.srcport) else "c"
+    
+        # Create new entry if flow is empty or previous sender does not match current sender.
+        # Otherwise concatenate it.
+        flow = stream["flow"]
+        if not flow or flow[-1]["from"] != name:
+            flow_data = {"from": name,
+                         "data": printable_data,
+                         "hex": "".join(raw_data), 
+                         "time": round(datetime.timestamp(pkt.sniff_time)*1000)
+                        }
+            flow.append(flow_data)
         else:
-            data_flow[tcp.addr].append(
-                {"from": name,
-                 "data": printable_data,
-                 "hex": data.encode("hex"),
-                 "time": int(float(nids.get_pkt_ts()) * 1000)
-                 }
-            )
-        #only if this we don't know if this flow contains a flag
-        if not contains_flag[tcp.addr] and containsFlag(data):
-            contains_flag[tcp.addr] = True
+            flow[-1]["data"] += printable_data
+            flow[-1]["hex"] += "".join(raw_data)
+            
+    # Insert into DB
+    db.insertFlows(filename, list(streams.values()))
+    db.setFileImported(filename)
+    print("Imported %s successfully." % filename)
 
-        tcp.discard(actor.count_new)
-
-    elif tcp.nids_state in end_states:
-        ((src, sport), (dst, dport)) = tcp.addr
-
-        done += 1
-        if done % 100 == 0: print(done)
-        if len(data_flow[tcp.addr]) == 0:
-            return
-
-        ts = int(float(nids.get_pkt_ts()) * 1000)
-
-        flow = {"inx": inx,
-                "filename": filename,
-                "src_ip": src,
-                "src_port": sport,
-                "dst_ip": dst,
-                "dst_port": dport,
-                "time": start_time[tcp.addr],
-                "duration": (ts - start_time[tcp.addr]),
-                "contains_flag": contains_flag[tcp.addr],
-                "starred": 0,
-                "flow": data_flow[tcp.addr]
-                }
-
-        flows_to_import.append(flow)
-        del data_flow[tcp.addr]
-        #TODO check if each flow is less than 16 MB (mongodb document limit)
-
-
-nids.param("pcap_filter", "tcp")  # restrict to TCP only
-nids.chksum_ctl([('0.0.0.0/0', False)])  # disable checksumming
-
-if len(sys.argv) == 2:
-    filename = sys.argv[1]
-    if "./" in filename:
-        filename = filename[2:]
-    print("importing pcaps from " + filename)
-    nids.param("filename", filename)
-else:
-    print("pcap file required")
-    exit()
-
-nids.init()
-nids.register_tcp(handleTcpStream)
-nids.run()
-
-print("importing " + str(len(flows_to_import)) + " flows into mongodb!")
-db.insertFlows(filename, flows_to_import)
-db.setFileImported(filename)
+if __name__ == "__main__":
+    main()

@@ -37,6 +37,8 @@ application = Flask(__name__)
 CORS(application)
 db = DB()
 
+def main():
+    application.run(host='0.0.0.0',threaded=True)
 
 def return_response(object):
     return Response(json_util.dumps(object), mimetype='applicationlication/json')
@@ -94,5 +96,4 @@ def confertToPwn(id):
     return converted
 
 if __name__ == "__main__":
-    application.run(host='0.0.0.0',threaded=True)
-
+    main()
